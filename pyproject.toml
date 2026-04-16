@@ -1,0 +1,16 @@
+[project]
+name = "mae-ablation"
+version = "0.1.0"
+description = "MAE (Masked Autoencoders) with AdamW vs Muon optimizer comparison"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "timm==0.3.2",
+    "datasets",
+    "mlflow",
+    "tensorboard",
+]
+
+[project.optional-dependencies]
+slurm = ["submitit"]

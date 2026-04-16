@@ -58,6 +58,9 @@ def get_args_parser():
     parser.set_defaults(norm_pix_loss=False)
 
     # Optimizer parameters
+    parser.add_argument('--optimizer', default='adamw', type=str,
+                        choices=['adamw', 'muon'],
+                        help='Optimizer: adamw or muon')
     parser.add_argument('--weight_decay', type=float, default=0.05,
                         help='weight decay (default: 0.05)')
 
@@ -101,11 +104,19 @@ def get_args_parser():
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
 
+    # data source
+    parser.add_argument('--data_source', default='imagefolder', type=str,
+                        choices=['imagefolder', 'huggingface'],
+                        help='Dataset source: imagefolder (torchvision) or huggingface (parquet)')
+
     return parser
 
 
 def main(args):
     misc.init_distributed_mode(args)
+
+    from util.mlflow_utils import init_mlflow, log_metrics, end_mlflow
+    mlflow_active = init_mlflow(args, experiment_name="mae-pretrain")
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
@@ -120,13 +131,17 @@ def main(args):
     cudnn.benchmark = True
 
     # simple augmentation
-    transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-    print(dataset_train)
+    if args.data_source == 'huggingface':
+        from util.datasets import build_dataset_hf_pretrain
+        dataset_train = build_dataset_hf_pretrain(is_train=True, args=args)
+    else:
+        transform_train = transforms.Compose([
+                transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+        print(dataset_train)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -175,9 +190,25 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
     
-    # following timm: set wd as 0 for bias and norm layers
-    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    # build optimizer
+    if args.optimizer == 'muon':
+        from util.muon import Muon
+        muon_params = []
+        adamw_params = []
+        for name, p in model_without_ddp.named_parameters():
+            if not p.requires_grad:
+                continue
+            if p.ndim >= 2 and 'patch_embed' not in name and 'pos_embed' not in name:
+                muon_params.append(p)
+            else:
+                adamw_params.append(p)
+        optimizer = Muon(muon_params, lr=args.lr, momentum=0.95,
+                         adamw_params=adamw_params, adamw_lr=args.lr,
+                         adamw_betas=(0.9, 0.95), adamw_wd=args.weight_decay)
+    else:
+        # following timm: set wd as 0 for bias and norm layers
+        param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
+        optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
     loss_scaler = NativeScaler()
 
@@ -202,6 +233,8 @@ def main(args):
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         'epoch': epoch,}
 
+        log_metrics(log_stats, step=epoch, active=mlflow_active)
+
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
@@ -211,6 +244,8 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+
+    end_mlflow(mlflow_active)
 
 
 if __name__ == '__main__':

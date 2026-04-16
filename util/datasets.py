@@ -11,10 +11,63 @@
 import os
 import PIL
 
+import torch
+from torch.utils.data import Dataset
 from torchvision import datasets, transforms
 
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+
+
+class HuggingFaceImageNet(Dataset):
+    """Wraps a HuggingFace datasets.Dataset (loaded from parquet) as a PyTorch Dataset."""
+
+    def __init__(self, hf_dataset, transform=None):
+        self.dataset = hf_dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        row = self.dataset[idx]
+        image = row["image"]
+        label = row["label"]
+        if not isinstance(image, PIL.Image.Image):
+            image = PIL.Image.open(image)
+        image = image.convert("RGB")
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, label
+
+
+def build_dataset_hf(is_train, args):
+    """Build dataset from HuggingFace parquet files at args.data_path."""
+    from datasets import load_dataset
+
+    split = "train" if is_train else "validation"
+    hf_ds = load_dataset(args.data_path, split=split)
+    transform = build_transform(is_train, args)
+    dataset = HuggingFaceImageNet(hf_ds, transform=transform)
+    print(f"HuggingFace {split} dataset: {len(dataset)} samples")
+    return dataset
+
+
+def build_dataset_hf_pretrain(is_train, args):
+    """Build pre-training dataset (simple augmentation) from HuggingFace parquet files."""
+    from datasets import load_dataset
+
+    split = "train" if is_train else "validation"
+    hf_ds = load_dataset(args.data_path, split=split)
+    transform = transforms.Compose([
+        transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    dataset = HuggingFaceImageNet(hf_ds, transform=transform)
+    print(f"HuggingFace {split} dataset: {len(dataset)} samples")
+    return dataset
 
 
 def build_dataset(is_train, args):

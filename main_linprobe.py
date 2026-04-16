@@ -52,6 +52,8 @@ def get_args_parser():
                         help='Name of model to train')
 
     # Optimizer parameters
+    parser.add_argument('--optimizer', default='lars', type=str,
+                        help='Optimizer (default: lars for linear probing)')
     parser.add_argument('--weight_decay', type=float, default=0,
                         help='weight decay (default: 0 for linear probe following MoCo v1)')
 
@@ -110,11 +112,19 @@ def get_args_parser():
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
 
+    # data source
+    parser.add_argument('--data_source', default='imagefolder', type=str,
+                        choices=['imagefolder', 'huggingface'],
+                        help='Dataset source: imagefolder (torchvision) or huggingface (parquet)')
+
     return parser
 
 
 def main(args):
     misc.init_distributed_mode(args)
+
+    from util.mlflow_utils import init_mlflow, log_metrics, end_mlflow
+    mlflow_active = init_mlflow(args, experiment_name="mae-linprobe")
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
@@ -139,10 +149,21 @@ def main(args):
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-    dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
-    print(dataset_train)
-    print(dataset_val)
+
+    if args.data_source == 'huggingface':
+        from datasets import load_dataset as load_hf_dataset
+        from util.datasets import HuggingFaceImageNet
+        hf_train = load_hf_dataset(args.data_path, split="train")
+        hf_val = load_hf_dataset(args.data_path, split="validation")
+        dataset_train = HuggingFaceImageNet(hf_train, transform=transform_train)
+        dataset_val = HuggingFaceImageNet(hf_val, transform=transform_val)
+        print(f"HuggingFace train dataset: {len(dataset_train)} samples")
+        print(f"HuggingFace val dataset: {len(dataset_val)} samples")
+    else:
+        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+        dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
+        print(dataset_train)
+        print(dataset_val)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -297,6 +318,8 @@ def main(args):
                         'epoch': epoch,
                         'n_parameters': n_parameters}
 
+        log_metrics(log_stats, step=epoch, active=mlflow_active)
+
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
@@ -306,6 +329,8 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+
+    end_mlflow(mlflow_active)
 
 
 if __name__ == '__main__':

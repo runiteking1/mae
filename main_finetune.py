@@ -58,6 +58,9 @@ def get_args_parser():
                         help='Drop path rate (default: 0.1)')
 
     # Optimizer parameters
+    parser.add_argument('--optimizer', default='adamw', type=str,
+                        choices=['adamw', 'muon'],
+                        help='Optimizer: adamw or muon')
     parser.add_argument('--clip_grad', type=float, default=None, metavar='NORM',
                         help='Clip gradient norm (default: None, no clipping)')
     parser.add_argument('--weight_decay', type=float, default=0.05,
@@ -152,11 +155,19 @@ def get_args_parser():
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
 
+    # data source
+    parser.add_argument('--data_source', default='imagefolder', type=str,
+                        choices=['imagefolder', 'huggingface'],
+                        help='Dataset source: imagefolder (torchvision) or huggingface (parquet)')
+
     return parser
 
 
 def main(args):
     misc.init_distributed_mode(args)
+
+    from util.mlflow_utils import init_mlflow, log_metrics, end_mlflow
+    mlflow_active = init_mlflow(args, experiment_name="mae-finetune")
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
@@ -170,8 +181,13 @@ def main(args):
 
     cudnn.benchmark = True
 
-    dataset_train = build_dataset(is_train=True, args=args)
-    dataset_val = build_dataset(is_train=False, args=args)
+    if args.data_source == 'huggingface':
+        from util.datasets import build_dataset_hf
+        dataset_train = build_dataset_hf(is_train=True, args=args)
+        dataset_val = build_dataset_hf(is_train=False, args=args)
+    else:
+        dataset_train = build_dataset(is_train=True, args=args)
+        dataset_val = build_dataset(is_train=False, args=args)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -279,12 +295,28 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
-    # build optimizer with layer-wise lr decay (lrd)
-    param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,
-        no_weight_decay_list=model_without_ddp.no_weight_decay(),
-        layer_decay=args.layer_decay
-    )
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
+    # build optimizer
+    if args.optimizer == 'muon':
+        from util.muon import Muon
+        muon_params = []
+        adamw_params = []
+        for name, p in model_without_ddp.named_parameters():
+            if not p.requires_grad:
+                continue
+            if p.ndim >= 2 and 'patch_embed' not in name and 'pos_embed' not in name and 'head' not in name:
+                muon_params.append(p)
+            else:
+                adamw_params.append(p)
+        optimizer = Muon(muon_params, lr=args.lr, momentum=0.95,
+                         adamw_params=adamw_params, adamw_lr=args.lr,
+                         adamw_betas=(0.9, 0.95), adamw_wd=args.weight_decay)
+    else:
+        # build optimizer with layer-wise lr decay (lrd)
+        param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,
+            no_weight_decay_list=model_without_ddp.no_weight_decay(),
+            layer_decay=args.layer_decay
+        )
+        optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
     loss_scaler = NativeScaler()
 
     if mixup_fn is not None:
@@ -337,6 +369,8 @@ def main(args):
                         'epoch': epoch,
                         'n_parameters': n_parameters}
 
+        log_metrics(log_stats, step=epoch, active=mlflow_active)
+
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
@@ -346,6 +380,8 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+
+    end_mlflow(mlflow_active)
 
 
 if __name__ == '__main__':
