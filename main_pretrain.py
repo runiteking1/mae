@@ -24,7 +24,7 @@ import torchvision.datasets as datasets
 
 import timm
 
-assert timm.__version__ == "0.3.2"  # version check
+#assert timm.__version__ == "0.3.2"  # version check
 import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
@@ -63,7 +63,6 @@ def get_args_parser():
                         help='Optimizer: adamw or muon')
     parser.add_argument('--weight_decay', type=float, default=0.05,
                         help='weight decay (default: 0.05)')
-
     parser.add_argument('--lr', type=float, default=None, metavar='LR',
                         help='learning rate (absolute lr)')
     parser.add_argument('--blr', type=float, default=1e-3, metavar='LR',
@@ -114,9 +113,6 @@ def get_args_parser():
 
 def main(args):
     misc.init_distributed_mode(args)
-
-    from util.mlflow_utils import init_mlflow, log_metrics, end_mlflow
-    mlflow_active = init_mlflow(args, experiment_name="mae-pretrain")
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
@@ -186,6 +182,9 @@ def main(args):
     print("accumulate grad iterations: %d" % args.accum_iter)
     print("effective batch size: %d" % eff_batch_size)
 
+    from util.mlflow_utils import init_mlflow, log_metrics, end_mlflow
+    mlflow_active = init_mlflow(args, experiment_name="mae-pretrain")
+
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
@@ -198,16 +197,26 @@ def main(args):
         for name, p in model_without_ddp.named_parameters():
             if not p.requires_grad:
                 continue
-            if p.ndim >= 2 and 'patch_embed' not in name and 'pos_embed' not in name:
+            # torch.optim.Muon is strictly 2D — route conv weights (patch_embed),
+            # pos_embed/cls_token/mask_token (3D), norms, and biases to AdamW.
+            if p.ndim == 2:
                 muon_params.append(p)
             else:
                 adamw_params.append(p)
-        optimizer = Muon(muon_params, lr=args.lr, momentum=0.95,
-                         adamw_params=adamw_params, adamw_lr=args.lr,
-                         adamw_betas=(0.9, 0.95), adamw_wd=args.weight_decay)
+        muon_numel = sum(p.numel() for p in muon_params)
+        adamw_numel = sum(p.numel() for p in adamw_params)
+        total_numel = muon_numel + adamw_numel
+        print(f"Muon: {len(muon_params)}/{len(muon_params) + len(adamw_params)} tensors, "
+              f"{muon_numel:,}/{total_numel:,} params "
+              f"({100.0 * muon_numel / total_numel:.2f}%); "
+              f"remaining {adamw_numel:,} params on AdamW")
+        optimizer = Muon(lr=args.lr, wd=args.weight_decay, muon_params=muon_params,
+                         momentum=0.95, adamw_params=adamw_params,
+                         adamw_betas=(0.9, 0.95))
     else:
         # following timm: set wd as 0 for bias and norm layers
-        param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
+        #param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay) # Old timm and doesn't work?
+        param_groups = optim_factory.param_groups_weight_decay(model_without_ddp, args.weight_decay)
         optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
     loss_scaler = NativeScaler()
@@ -223,6 +232,7 @@ def main(args):
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             log_writer=log_writer,
+            mlflow_active=mlflow_active,
             args=args
         )
         if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epochs):
@@ -233,7 +243,8 @@ def main(args):
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         'epoch': epoch,}
 
-        log_metrics(log_stats, step=epoch, active=mlflow_active)
+        epoch_metrics = {f'epoch/{k}': v for k, v in train_stats.items()}
+        log_metrics(epoch_metrics, step=epoch, active=mlflow_active)
 
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:

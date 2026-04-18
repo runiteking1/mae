@@ -307,9 +307,9 @@ def main(args):
                 muon_params.append(p)
             else:
                 adamw_params.append(p)
-        optimizer = Muon(muon_params, lr=args.lr, momentum=0.95,
-                         adamw_params=adamw_params, adamw_lr=args.lr,
-                         adamw_betas=(0.9, 0.95), adamw_wd=args.weight_decay)
+        optimizer = Muon(lr=args.lr, wd=args.weight_decay, muon_params=muon_params,
+                         momentum=0.95, adamw_params=adamw_params,
+                         adamw_betas=(0.9, 0.95))
     else:
         # build optimizer with layer-wise lr decay (lrd)
         param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,

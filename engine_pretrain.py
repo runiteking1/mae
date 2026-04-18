@@ -12,6 +12,7 @@ import math
 import sys
 from typing import Iterable
 
+import mlflow
 import torch
 
 import util.misc as misc
@@ -22,6 +23,7 @@ def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
                     log_writer=None,
+                    mlflow_active=False,
                     args=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
@@ -44,7 +46,7 @@ def train_one_epoch(model: torch.nn.Module,
 
         samples = samples.to(device, non_blocking=True)
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             loss, _, _ = model(samples, mask_ratio=args.mask_ratio)
 
         loss_value = loss.item()
@@ -67,13 +69,14 @@ def train_one_epoch(model: torch.nn.Module,
         metric_logger.update(lr=lr)
 
         loss_value_reduce = misc.all_reduce_mean(loss_value)
-        if log_writer is not None and (data_iter_step + 1) % accum_iter == 0:
-            """ We use epoch_1000x as the x-axis in tensorboard.
-            This calibrates different curves when batch size changes.
-            """
+        if (data_iter_step + 1) % accum_iter == 0:
+            # epoch_1000x as x-axis calibrates curves across different batch sizes
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
-            log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
-            log_writer.add_scalar('lr', lr, epoch_1000x)
+            if log_writer is not None:
+                log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
+                log_writer.add_scalar('lr', lr, epoch_1000x)
+            if mlflow_active:
+                mlflow.log_metrics({'train_loss': loss_value_reduce, 'lr': lr}, step=epoch_1000x)
 
 
     # gather the stats from all processes
