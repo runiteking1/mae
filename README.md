@@ -21,6 +21,15 @@ This is a PyTorch/GPU re-implementation of the paper [Masked Autoencoders Are Sc
 
 * This repo is based on [`timm==0.3.2`](https://github.com/rwightman/pytorch-image-models), for which a [fix](https://github.com/rwightman/pytorch-image-models/issues/420#issuecomment-776459842) is needed to work with PyTorch 1.8.1+.
 
+### Optimizer ablation (this fork): AdamW vs. Muon vs. Muon + Polar Express
+
+This fork extends MAE into an **optimizer ablation study**. `--optimizer {adamw,muon,muon_polar}`
+selects the optimizer in both `main_pretrain.py` and `main_finetune.py`. `muon_polar` adds the
+**Polar Express** schedule ([Amsel et al., 2025](https://arxiv.org/abs/2505.16932)): same Muon
+update, but the Newton-Schulz orthogonalization uses per-iteration coefficients
+(`util/muon.py:_POLAR_EXPRESS_COEFFS` / `zeropower_polar_express`) that converge to a true polar
+factor `UVᵀ`, rather than vanilla Muon's fixed quintic. See `CLAUDE.md` for the full workflow.
+
 ### Catalog
 
 - [x] Visualization demo

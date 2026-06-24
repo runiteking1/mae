@@ -23,7 +23,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import timm
 
-assert timm.__version__ == "0.3.2" # version check
+# assert timm.__version__ == "0.3.2" # version check
 from timm.models.layers import trunc_normal_
 from timm.data.mixup import Mixup
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
@@ -59,8 +59,8 @@ def get_args_parser():
 
     # Optimizer parameters
     parser.add_argument('--optimizer', default='adamw', type=str,
-                        choices=['adamw', 'muon'],
-                        help='Optimizer: adamw or muon')
+                        choices=['adamw', 'muon', 'muon_polar'],
+                        help='Optimizer: adamw, muon, or muon_polar (Polar Express schedule)')
     parser.add_argument('--clip_grad', type=float, default=None, metavar='NORM',
                         help='Clip gradient norm (default: None, no clipping)')
     parser.add_argument('--weight_decay', type=float, default=0.05,
@@ -243,11 +243,11 @@ def main(args):
     model = models_vit.__dict__[args.model](
         num_classes=args.nb_classes,
         drop_path_rate=args.drop_path,
-        global_pool=args.global_pool,
+        global_pool='avg' if args.global_pool else 'token',
     )
 
     if args.finetune and not args.eval:
-        checkpoint = torch.load(args.finetune, map_location='cpu')
+        checkpoint = torch.load(args.finetune, map_location='cpu', weights_only=False)
 
         print("Load pre-trained checkpoint from: %s" % args.finetune)
         checkpoint_model = checkpoint['model']
@@ -296,20 +296,27 @@ def main(args):
         model_without_ddp = model.module
 
     # build optimizer
-    if args.optimizer == 'muon':
+    if args.optimizer in ('muon', 'muon_polar'):
         from util.muon import Muon
-        muon_params = []
-        adamw_params = []
-        for name, p in model_without_ddp.named_parameters():
-            if not p.requires_grad:
-                continue
-            if p.ndim >= 2 and 'patch_embed' not in name and 'pos_embed' not in name and 'head' not in name:
-                muon_params.append(p)
-            else:
-                adamw_params.append(p)
-        optimizer = Muon(lr=args.lr, wd=args.weight_decay, muon_params=muon_params,
-                         momentum=0.95, adamw_params=adamw_params,
-                         adamw_betas=(0.9, 0.95))
+        polar = args.optimizer == 'muon_polar'
+        param_groups = lrd.param_groups_lrd_muon(
+            model_without_ddp, args.weight_decay,
+            no_weight_decay_list=model_without_ddp.no_weight_decay(),
+            layer_decay=args.layer_decay,
+        )
+        muon_numel = sum(p.numel() for g in param_groups for p in g["params"] if g["use_muon"])
+        adamw_numel = sum(p.numel() for g in param_groups for p in g["params"] if not g["use_muon"])
+        muon_tensors = sum(len(g["params"]) for g in param_groups if g["use_muon"])
+        adamw_tensors = sum(len(g["params"]) for g in param_groups if not g["use_muon"])
+        total_numel = muon_numel + adamw_numel
+        print(f"Muon{' (polar express)' if polar else ''}: "
+              f"{muon_tensors}/{muon_tensors + adamw_tensors} tensors, "
+              f"{muon_numel:,}/{total_numel:,} params "
+              f"({100.0 * muon_numel / total_numel:.2f}%); "
+              f"remaining {adamw_numel:,} params on AdamW; "
+              f"{len(param_groups)} layer-wise groups (layer_decay={args.layer_decay})")
+        optimizer = Muon(param_groups, lr=args.lr, wd=args.weight_decay,
+                         momentum=0.95, polar=polar, adamw_betas=(0.9, 0.95))
     else:
         # build optimizer with layer-wise lr decay (lrd)
         param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,

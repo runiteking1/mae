@@ -38,6 +38,47 @@ def zeropower_via_newtonschulz5(G, steps):
     return X
 
 
+#############################
+# Polar Express (Amsel et al., 2025, arXiv:2505.16932)
+#############################
+
+# Per-iteration coefficients for the odd polynomial p(x) = a*x + b*x^3 + c*x^5.
+# Unlike vanilla Muon's single fixed triple repeated `ns_steps` times, Polar Express
+# solves a minimax problem per iteration so orthogonalization converges faster/more
+# accurately; the schedule converges to the optimal asymptotic (1.875, -1.25, 0.375).
+# The /1.01^k factors are the polynomial safety factor that contracts each iterate to
+# stay convergent under round-off (the last, exact, iterate needs none).
+_POLAR_EXPRESS_COEFFS = [
+    (8.28721201814563   / 1.01, -23.595886519098837 / (1.01**3), 17.300387312530933  / (1.01**5)),
+    (4.107059111542203  / 1.01,  -2.9478499167379106 / (1.01**3),  0.5448431082926601 / (1.01**5)),
+    (3.9486908534822946 / 1.01,  -2.908902115962949  / (1.01**3),  0.5518191394370137 / (1.01**5)),
+    (3.3184196573706015 / 1.01,  -2.488488024314874  / (1.01**3),  0.51004894012372   / (1.01**5)),
+    (2.300652019954817  / 1.01,  -1.6689039845747493 / (1.01**3),  0.4188073119525673 / (1.01**5)),
+    (1.891301407787398  / 1.01,  -1.2679958271945868 / (1.01**3),  0.37680408948524835/ (1.01**5)),
+    (1.8750014808534479 / 1.01,  -1.2500016453999487 / (1.01**3),  0.3750001645474248 / (1.01**5)),
+    (1.875,                       -1.25,                            0.375),
+]
+
+
+@torch.compile
+def zeropower_polar_express(G):
+    """
+    Polar Express orthogonalization: same X <- a*X + b*(X X^T) X + c*(X X^T)^2 X update as
+    Newton-Schulz, but with the iteration-dependent coefficient schedule above (a fixed 8 steps,
+    so there is no `steps` argument). The input is normalized so its spectral norm is < 1 (an
+    extra /1.01 input-safety margin), and compute is in float32 for stability.
+    """
+    assert G.ndim == 2
+    transposed = G.shape[0] > G.shape[1]
+    X = (G.mT if transposed else G).float()
+    X = X / (X.norm(p="fro") + 1e-2)
+    X = X / 1.01
+    for a, b, c in _POLAR_EXPRESS_COEFFS:
+        A = X @ X.mT
+        X = a * X + (b * A + c * (A @ A)) @ X
+    return (X.mT if transposed else X).to(dtype=G.dtype)
+
+
 class Muon(torch.optim.Optimizer):
     """
     Muon - MomentUm Orthogonalized by Newton-schulz
@@ -67,12 +108,14 @@ class Muon(torch.optim.Optimizer):
 
     def __init__(
         self,
+        params=None,
         lr=1e-3,
         wd=0.1,
         muon_params=None,
         momentum=0.95,
         nesterov=True,
         ns_steps=5,
+        polar=False,
         adamw_params=None,
         adamw_betas=(0.95, 0.95),
         adamw_eps=1e-8,
@@ -84,22 +127,32 @@ class Muon(torch.optim.Optimizer):
             momentum=momentum,
             nesterov=nesterov,
             ns_steps=ns_steps,
+            polar=polar,
             adamw_betas=adamw_betas,
             adamw_eps=adamw_eps,
         )
 
-        params = list(muon_params)
-        adamw_params = list(adamw_params) if adamw_params is not None else []
-        params.extend(adamw_params)
-        super().__init__(params, defaults)
-        # Sort parameters into those for which we will use Muon, and those for which we will not
-        for p in muon_params:
-            # Use Muon for every parameter in muon_params which is >= 2D and doesn't look like an embedding or head layer
-            assert p.ndim == 2, p.ndim
-            self.state[p]["use_muon"] = True
-        for p in adamw_params:
-            # Do not use Muon for parameters in adamw_params
-            self.state[p]["use_muon"] = False
+        if muon_params is None and adamw_params is None:
+            # `params` is an iterable of group dicts; each must declare `use_muon`.
+            # Lets callers pass per-layer groups carrying `lr_scale` / `weight_decay`,
+            # which `step()` already honors via `self.param_groups`.
+            super().__init__(params, defaults)
+            for group in self.param_groups:
+                use_muon = group["use_muon"]
+                for p in group["params"]:
+                    if use_muon:
+                        assert p.ndim == 2, p.ndim
+                    self.state[p]["use_muon"] = use_muon
+        else:
+            muon_params = list(muon_params) if muon_params is not None else []
+            adamw_params = list(adamw_params) if adamw_params is not None else []
+            all_params = muon_params + list(adamw_params)
+            super().__init__(all_params, defaults)
+            for p in muon_params:
+                assert p.ndim == 2, p.ndim
+                self.state[p]["use_muon"] = True
+            for p in adamw_params:
+                self.state[p]["use_muon"] = False
 
     def adjust_lr_for_muon(self, lr, param_shape):
         A, B = param_shape[:2]
@@ -152,7 +205,10 @@ class Muon(torch.optim.Optimizer):
                     g = g.add(buf, alpha=momentum)
                 else:
                     g = buf
-                u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
+                if group["polar"]:
+                    u = zeropower_polar_express(g)
+                else:
+                    u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
 
                 # scale update
                 adjusted_lr = self.adjust_lr_for_muon(lr, p.shape)

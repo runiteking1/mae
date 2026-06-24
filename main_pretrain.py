@@ -59,8 +59,8 @@ def get_args_parser():
 
     # Optimizer parameters
     parser.add_argument('--optimizer', default='adamw', type=str,
-                        choices=['adamw', 'muon'],
-                        help='Optimizer: adamw or muon')
+                        choices=['adamw', 'muon', 'muon_polar'],
+                        help='Optimizer: adamw, muon, or muon_polar (Polar Express schedule)')
     parser.add_argument('--weight_decay', type=float, default=0.05,
                         help='weight decay (default: 0.05)')
     parser.add_argument('--lr', type=float, default=None, metavar='LR',
@@ -190,8 +190,9 @@ def main(args):
         model_without_ddp = model.module
     
     # build optimizer
-    if args.optimizer == 'muon':
+    if args.optimizer in ('muon', 'muon_polar'):
         from util.muon import Muon
+        polar = args.optimizer == 'muon_polar'
         muon_params = []
         adamw_params = []
         for name, p in model_without_ddp.named_parameters():
@@ -206,12 +207,13 @@ def main(args):
         muon_numel = sum(p.numel() for p in muon_params)
         adamw_numel = sum(p.numel() for p in adamw_params)
         total_numel = muon_numel + adamw_numel
-        print(f"Muon: {len(muon_params)}/{len(muon_params) + len(adamw_params)} tensors, "
+        print(f"Muon{' (polar express)' if polar else ''}: "
+              f"{len(muon_params)}/{len(muon_params) + len(adamw_params)} tensors, "
               f"{muon_numel:,}/{total_numel:,} params "
               f"({100.0 * muon_numel / total_numel:.2f}%); "
               f"remaining {adamw_numel:,} params on AdamW")
         optimizer = Muon(lr=args.lr, wd=args.weight_decay, muon_params=muon_params,
-                         momentum=0.95, adamw_params=adamw_params,
+                         momentum=0.95, polar=polar, adamw_params=adamw_params,
                          adamw_betas=(0.9, 0.95))
     else:
         # following timm: set wd as 0 for bias and norm layers
