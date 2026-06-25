@@ -22,14 +22,15 @@ unset SLURM_PROCID
 # Polar Express ablation: ViT-Base | Muon + Polar Express | effective lr=2.4e-3
 # (matched to muon_base_2.4e-3.sh; higher lr was a no-op, so only 2.4e-3 here).
 # blr=1.5e-4, eff_batch=256*16=4096 → actual lr = 1.5e-4 * (4096/256) = 2.4e-3
-# Target ~560 epochs; --epochs sets the cosine-decay endpoint. Resumes from
-# checkpoint-latest.pth, so chain several jobs (see submit_muon_polar.sh) to
-# reach the target within the 4-day walltime.
+# Schedule matched to the vanilla muon_base/adamw_base runs: same peak lr,
+# warmup, and 800-epoch cosine horizon, so LR-vs-epoch is byte-identical to them.
+# Compute-limited to ~560 epochs by the chained jobs (won't reach 800), exactly
+# like the vanilla runs. Resumes from checkpoint-latest.pth.
 OUTPUT_DIR=./output_dir/ablation/base_muon_polar_lr2.4e-3
 uv run python main_pretrain.py \
         --batch_size 256 \
         --accum_iter 16 \
-        --epochs 560 \
+        --epochs 800 \
         --model mae_vit_base_patch16 \
         --norm_pix_loss \
         --optimizer muon_polar \
