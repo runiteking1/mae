@@ -35,7 +35,7 @@ def get_args():
                    help="comma-separated ImageNet label indices; overrides --n_classes/--class_seed")
     p.add_argument("--class_seed", type=int, default=0, help="seed for which classes are drawn")
     p.add_argument("--shot_seed", type=int, default=0, help="seed for which train images are drawn")
-    p.add_argument("--val_per_class", type=int, default=0, help="0 = all val images of each class")
+    p.add_argument("--val_per_class", type=int, default=0, help="0 = all val images of each class (ImageNet has 50/class, so 50 is the max)")
     return p.parse_args()
 
 
@@ -92,6 +92,9 @@ def main():
     val_idx = []
     for c in classes:
         pool = np.flatnonzero(val_labels == c)
+        if args.val_per_class > len(pool):
+            raise SystemExit(f"--val_per_class {args.val_per_class}: class {c} ({names[c]}) has only "
+                             f"{len(pool)} ImageNet val images; the default (0) already uses all of them")
         if args.val_per_class:
             pool = np.sort(np.random.default_rng(0).choice(pool, size=args.val_per_class, replace=False))
         val_idx.append(pool.tolist())
