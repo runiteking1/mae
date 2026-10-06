@@ -5,7 +5,7 @@
 Prints a table of val acc1 per run: final, mean over the last K evals, max (picked
 on the val set, so optimistic), epochs done.
 
-Also writes output_dir/fewshot/<draw>/curves.png: train loss (per step, from
+Also writes output_dir/fewshot/<draw>/curves_e<EPOCHS>.png (one per epoch budget): train loss (per step, from
 tensorboard events, N-step moving average), val loss and val acc1 (from log.txt)
 vs. epoch. Color = init (pretrain checkpoint / scratch), line style = finetune LR.
 Train loss is the mixup/cutmix + label-smoothing soft-target loss, so it is not on
@@ -33,7 +33,7 @@ plt.rcParams.update({
     "legend.fontsize": FONT_SIZE - 1,
 })
 
-RUN_RE = re.compile(r"^(?P<tag>.+)_ft-(?P<opt>[a-z_]+)_lr(?P<lr>[0-9.e+-]+)_seed(?P<seed>\d+)$")
+RUN_RE = re.compile(r"^(?P<tag>.+)_ft-(?P<opt>[a-z_]+)_lr(?P<lr>[0-9.e+-]+)(?:_e(?P<budget>\d+))?_seed(?P<seed>\d+)$")
 STYLES = ["-", "--", ":", "-."]
 
 
@@ -70,14 +70,24 @@ def short_tag(tag):
     return f"ckpt {m.group(1)}" if m else tag
 
 
+def epoch_budget(run_dir, r):
+    """Planned epochs from the run name; older runs without it: the epochs logged."""
+    if r["budget"]:
+        return int(r["budget"])
+    return int(val_curves(run_dir)[0][-1]) if (run_dir / "log.txt").stat().st_size else 0
+
+
 def plot_draw(draw_dir, k):
-    runs = []
+    by_budget = {}
     for d in sorted(p for p in draw_dir.iterdir() if (p / "log.txt").is_file()):
         m = RUN_RE.match(d.name)
         if m:
-            runs.append((d, m.groupdict()))
-    if not runs:
-        return None
+            r = m.groupdict()
+            by_budget.setdefault(epoch_budget(d, r), []).append((d, r))
+    return [plot_runs(runs, draw_dir, budget, k) for budget, runs in sorted(by_budget.items())]
+
+
+def plot_runs(runs, draw_dir, budget, k):
 
     tags = sorted({r["tag"] for _, r in runs}, key=lambda t: (t == "scratch", t))
     runs.sort(key=lambda dr: (tags.index(dr[1]["tag"]), dr[1]["opt"], float(dr[1]["lr"]), dr[1]["seed"]))
@@ -113,10 +123,10 @@ def plot_draw(draw_dir, k):
         ax.set_xlabel("epoch")
         ax.grid(True, alpha=0.3)
     axes[2].legend(frameon=False, loc="best")
-    fig.suptitle(draw_dir.name, fontsize=FONT_SIZE)
+    fig.suptitle(f"{draw_dir.name}, {budget} epochs", fontsize=FONT_SIZE)
     fig.tight_layout()
 
-    out = draw_dir / "curves.png"
+    out = draw_dir / f"curves_e{budget}.png"
     fig.savefig(out, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return out
@@ -156,8 +166,7 @@ def main():
     print()
     for d in sorted(Path(args.root).iterdir()):
         if d.is_dir():
-            out = plot_draw(d, args.smooth)
-            if out:
+            for out in plot_draw(d, args.smooth):
                 print(f"saved {out}")
 
 

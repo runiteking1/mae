@@ -34,16 +34,16 @@ MODEL=vit_base_patch16
 DROP_PATH=0.1
 OPTIMIZERS=(adamw)          # finetune optimizer(s): adamw | muon | muon_polar
 SEEDS=(0)
-EPOCHS=${EPOCHS:-1000}
+EPOCHS=${EPOCHS:-5000}          # part of the run name, so a new budget = new runs
 WARMUP_EPOCHS=${WARMUP_EPOCHS:-100}
-EVAL_FREQ=${EVAL_FREQ:-25}
+EVAL_FREQ=${EVAL_FREQ:-50}
 BATCH_SIZE=${BATCH_SIZE:-16}
 
 printf '%-70s  %-7s  %s\n' RUN STATUS JOB_ID/REASON
 
 submit() {  # init_tag init ckpt_epoch layer_decay opt lr draw seed
     local tag=$1 init=$2 ckpt=$3 ld=$4 opt=$5 lr=$6 draw=$7 seed=$8
-    local run="${draw}/${tag}_ft-${opt}_lr${lr}_seed${seed}"
+    local run="${draw}/${tag}_ft-${opt}_lr${lr}_e${EPOCHS}_seed${seed}"
     local out=${MAE_DIR}/output_dir/fewshot/${run}
 
     if [[ -s ${out}/log.txt ]]; then
