@@ -135,6 +135,11 @@ def get_args_parser():
     parser.add_argument('--resume', default='',
                         help='resume from checkpoint')
 
+    parser.add_argument('--save_freq', default=1, type=int,
+                        help='save a checkpoint every N epochs (and at the last epoch); 0 = never')
+    parser.add_argument('--eval_freq', default=1, type=int,
+                        help='evaluate and append to log.txt every N epochs (and at the last epoch)')
+
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true',
@@ -221,6 +226,7 @@ def main(args):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
+        persistent_workers=args.num_workers > 0,
     )
 
     data_loader_val = torch.utils.data.DataLoader(
@@ -356,10 +362,14 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir:
+        last_epoch = epoch + 1 == args.epochs
+        if args.output_dir and args.save_freq > 0 and ((epoch + 1) % args.save_freq == 0 or last_epoch):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
+
+        if (epoch + 1) % args.eval_freq != 0 and not last_epoch:
+            continue
 
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")

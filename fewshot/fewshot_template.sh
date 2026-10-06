@@ -21,9 +21,11 @@
 #   MODEL          vit_base_patch16
 #   FINETUNE_OPT   adamw    (adamw | muon | muon_polar)
 #   LR             1e-4     absolute LR (bypasses blr scaling)
-#   BATCH_SIZE     16       must be <= #train images x repeat (drop_last=True)
-#   EPOCHS         40       epochs over the *repeated* train set
-#   WARMUP_EPOCHS  4
+#   BATCH_SIZE     16       must be <= #train images (drop_last=True)
+#   EPOCHS         1000     passes over the train set (64 images @ bs16 = 4 steps/epoch)
+#   WARMUP_EPOCHS  100
+#   EVAL_FREQ      25       eval + log.txt line every N epochs (and at the end)
+#   SAVE_FREQ      0        checkpoint every N epochs; 0 = never, EPOCHS = final only
 #   LAYER_DECAY    0.65     (use 1.0 for scratch)
 #   DROP_PATH      0.1
 #   WEIGHT_DECAY   0.05
@@ -31,7 +33,6 @@
 #   REPROB         0.25
 #   SMOOTHING      0.1
 #   SEED           0        torch seed (init of head / scratch weights, aug, order)
-#   KEEP_CKPT      0        1 = keep the final checkpoint (~1 GB for ViT-B)
 
 set -euo pipefail
 
@@ -43,8 +44,10 @@ MODEL="${MODEL:-vit_base_patch16}"
 FINETUNE_OPT="${FINETUNE_OPT:-adamw}"
 LR="${LR:-1e-4}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
-EPOCHS="${EPOCHS:-40}"
-WARMUP_EPOCHS="${WARMUP_EPOCHS:-4}"
+EPOCHS="${EPOCHS:-1000}"
+WARMUP_EPOCHS="${WARMUP_EPOCHS:-100}"
+EVAL_FREQ="${EVAL_FREQ:-25}"
+SAVE_FREQ="${SAVE_FREQ:-0}"
 LAYER_DECAY="${LAYER_DECAY:-0.65}"
 DROP_PATH="${DROP_PATH:-0.1}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.05}"
@@ -53,7 +56,6 @@ CUTMIX="${CUTMIX:-1.0}"
 REPROB="${REPROB:-0.25}"
 SMOOTHING="${SMOOTHING:-0.1}"
 SEED="${SEED:-0}"
-KEEP_CKPT="${KEEP_CKPT:-0}"
 
 MAE_DIR=/home/sjiang/Documents/mae
 cd ${MAE_DIR}
@@ -87,30 +89,12 @@ echo "MODEL         = ${MODEL}"
 echo "FINETUNE_OPT  = ${FINETUNE_OPT}"
 echo "LR            = ${LR}"
 echo "BATCH_SIZE    = ${BATCH_SIZE}"
-echo "EPOCHS        = ${EPOCHS} (warmup ${WARMUP_EPOCHS})"
+echo "EPOCHS        = ${EPOCHS} (warmup ${WARMUP_EPOCHS}, eval every ${EVAL_FREQ}, save every ${SAVE_FREQ})"
 echo "LAYER_DECAY   = ${LAYER_DECAY}"
 echo "DROP_PATH     = ${DROP_PATH}"
 echo "MIXUP/CUTMIX  = ${MIXUP}/${CUTMIX}"
 echo "SEED          = ${SEED}"
 echo "OUTPUT_DIR    = ${OUTPUT_DIR}"
-
-# main_finetune.py writes a full checkpoint every epoch. Delete every
-# checkpoint older than the one checkpoint-latest.pth points at; the file being
-# written is always newer than latest, so it is never touched.
-prune_ckpts() {
-    local latest n f
-    latest=$(readlink "${OUTPUT_DIR}/checkpoint-latest.pth" 2>/dev/null || true)
-    [[ "${latest}" =~ checkpoint-([0-9]+)\.pth ]] || return 0
-    n=${BASH_REMATCH[1]}
-    for f in "${OUTPUT_DIR}"/checkpoint-[0-9]*.pth; do
-        [[ "${f}" =~ checkpoint-([0-9]+)\.pth$ ]] || continue
-        (( BASH_REMATCH[1] < n )) && rm -f "${f}"
-    done
-    return 0
-}
-( while true; do prune_ckpts; sleep 15; done ) &
-PRUNER=$!
-trap 'kill ${PRUNER} 2>/dev/null || true' EXIT
 
 uv run python main_finetune.py \
         --batch_size ${BATCH_SIZE} \
@@ -129,6 +113,8 @@ uv run python main_finetune.py \
         --reprob ${REPROB} \
         --smoothing ${SMOOTHING} \
         --seed ${SEED} \
+        --eval_freq ${EVAL_FREQ} \
+        --save_freq ${SAVE_FREQ} \
         --nb_classes ${NB_CLASSES} \
         --num_workers 8 \
         --data_source imagefolder \
@@ -136,8 +122,3 @@ uv run python main_finetune.py \
         --output_dir ${OUTPUT_DIR} \
         --log_dir ${OUTPUT_DIR}
 
-kill ${PRUNER} 2>/dev/null || true
-prune_ckpts
-if [[ "${KEEP_CKPT}" != "1" ]]; then
-    rm -f "${OUTPUT_DIR}"/checkpoint-*.pth
-fi
