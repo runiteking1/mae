@@ -9,6 +9,7 @@
 # BEiT: https://github.com/microsoft/unilm/tree/master/beit
 # --------------------------------------------------------
 
+import argparse
 import builtins
 import datetime
 import os
@@ -325,6 +326,7 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
             if not os.path.exists(args.resume):
                 print(f"Resume path {args.resume} not found, starting from scratch")
                 return
+            torch.serialization.add_safe_globals([argparse.Namespace])
             checkpoint = torch.load(args.resume, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'])
         print("Resume checkpoint %s" % args.resume)

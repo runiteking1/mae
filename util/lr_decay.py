@@ -61,6 +61,64 @@ def param_groups_lrd(model, weight_decay=0.05, no_weight_decay_list=[], layer_de
     return list(param_groups.values())
 
 
+def param_groups_lrd_muon(model, weight_decay=0.05, no_weight_decay_list=[], layer_decay=.75):
+    """
+    Layer-wise lr decay groups with per-group Muon vs AdamW assignment.
+
+    Each returned group carries `use_muon` so `Muon(...)` can route updates per-group
+    while `util.lr_sched.adjust_learning_rate` keeps applying `lr_scale` per layer.
+    Muon is used only for 2D weight matrices inside transformer blocks; embeddings,
+    head, norms, and biases stay on the AdamW backup branch.
+    """
+    param_group_names = {}
+    param_groups = {}
+
+    num_layers = len(model.blocks) + 1
+    layer_scales = list(layer_decay ** (num_layers - i) for i in range(num_layers + 1))
+
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+
+        if p.ndim == 1 or n in no_weight_decay_list:
+            g_decay = "no_decay"
+            this_decay = 0.
+        else:
+            g_decay = "decay"
+            this_decay = weight_decay
+
+        use_muon = (
+            p.ndim == 2
+            and 'patch_embed' not in n
+            and 'pos_embed' not in n
+            and 'head' not in n
+        )
+
+        layer_id = get_layer_id_for_vit(n, num_layers)
+        opt_tag = "muon" if use_muon else "adamw"
+        group_name = "layer_%d_%s_%s" % (layer_id, opt_tag, g_decay)
+
+        if group_name not in param_group_names:
+            this_scale = layer_scales[layer_id]
+            param_group_names[group_name] = {
+                "lr_scale": this_scale,
+                "weight_decay": this_decay,
+                "use_muon": use_muon,
+                "params": [],
+            }
+            param_groups[group_name] = {
+                "lr_scale": this_scale,
+                "weight_decay": this_decay,
+                "use_muon": use_muon,
+                "params": [],
+            }
+
+        param_group_names[group_name]["params"].append(n)
+        param_groups[group_name]["params"].append(p)
+
+    return list(param_groups.values())
+
+
 def get_layer_id_for_vit(name, num_layers):
     """
     Assign a parameter with its layer id

@@ -31,7 +31,12 @@ class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
 
             del self.norm  # remove the original norm
 
-    def forward_features(self, x):
+    def forward_head(self, x, pre_logits=False):
+        # forward_features already pooled and normalized; skip self.pool and self.fc_norm
+        x = self.head_drop(x)
+        return x if pre_logits else self.head(x)
+
+    def forward_features(self, x, **kwargs):
         B = x.shape[0]
         x = self.patch_embed(x)
 

@@ -52,7 +52,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             outputs = model(samples)
             loss = criterion(outputs, targets)
 
@@ -86,8 +86,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             This calibrates different curves when batch size changes.
             """
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
-            log_writer.add_scalar('loss', loss_value_reduce, epoch_1000x)
-            log_writer.add_scalar('lr', max_lr, epoch_1000x)
+            try:
+                log_writer.add_scalar('loss', loss_value_reduce, epoch_1000x)
+                log_writer.add_scalar('lr', max_lr, epoch_1000x)
+            except Exception:
+                pass
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -112,7 +115,7 @@ def evaluate(data_loader, model, device):
         target = target.to(device, non_blocking=True)
 
         # compute output
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             output = model(images)
             loss = criterion(output, target)
 
